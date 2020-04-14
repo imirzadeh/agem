@@ -49,7 +49,7 @@ IMP_METHOD = 'EWC'
 SYNAP_STGTH = 75000
 FISHER_EMA_DECAY = 0.9      # Exponential moving average decay factor for Fisher computation (online Fisher)
 FISHER_UPDATE_AFTER = 10    # Number of training iterations for which the F_{\theta}^t is computed (see Eq. 10 in RWalk paper) 
-SAMPLES_PER_CLASS = 25   # Number of samples per task
+SAMPLES_PER_CLASS = 20   # Number of samples per task
 INPUT_FEATURE_SIZE = 784
 IMG_HEIGHT = 28
 IMG_WIDTH = 28
@@ -69,7 +69,7 @@ LOG_DIR = './permute_mnist_results'
 ## Evaluation options
 
 ## Num Tasks
-NUM_TASKS = 20
+NUM_TASKS = 5
 MULTI_TASK = False
 
 def get_arguments():
