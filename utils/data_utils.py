@@ -658,7 +658,7 @@ def construct_permute_mnist(num_tasks):
     datasets = []
 
     for i in range(num_tasks):
-        perm_inds = range(mnist.train.images.shape[1])
+        perm_inds = list(range(mnist.train.images.shape[1]))
         np.random.shuffle(perm_inds)
         copied_mnist = deepcopy(mnist)
         sets = ["train", "validation", "test"]
