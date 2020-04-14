@@ -49,7 +49,7 @@ IMP_METHOD = 'EWC'
 SYNAP_STGTH = 75000
 FISHER_EMA_DECAY = 0.9      # Exponential moving average decay factor for Fisher computation (online Fisher)
 FISHER_UPDATE_AFTER = 10    # Number of training iterations for which the F_{\theta}^t is computed (see Eq. 10 in RWalk paper) 
-SAMPLES_PER_CLASS = 20   # Number of samples per task
+SAMPLES_PER_CLASS = 10   # Number of samples per task
 INPUT_FEATURE_SIZE = 784
 IMG_HEIGHT = 28
 IMG_WIDTH = 28
@@ -81,7 +81,7 @@ def get_arguments():
     parser = argparse.ArgumentParser(description="Script for permutted mnist experiment.")
     parser.add_argument("--cross-validate-mode", action="store_true",
                        help="If option is chosen then snapshoting after each batch is disabled")
-    parser.add_argument("--online-cross-val", action="store_true",
+    parser.add_argument("--online-cross-val", action="store_false",
                        help="If option is chosen then enable the online cross validation of the learning rate")
     parser.add_argument("--train-single-epoch", action="store_true",
                        help="If option is chosen then train for single epoch")
