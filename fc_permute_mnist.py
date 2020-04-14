@@ -55,7 +55,7 @@ IMG_HEIGHT = 28
 IMG_WIDTH = 28
 IMG_CHANNELS = 1
 TOTAL_CLASSES = 10          # Total number of classes in the dataset 
-EPS_MEM_BATCH_SIZE = 256
+EPS_MEM_BATCH_SIZE = 64
 DEBUG_EPISODIC_MEMORY = False
 USE_GPU = True
 K_FOR_CROSS_VAL = 3
@@ -451,7 +451,7 @@ def test_task_sequence(model, sess, test_data, cross_validate_mode):
             acc = model.accuracy.eval(feed_dict = feed_dict)
 
         list_acc.append(acc)
-
+    print("accuracy_list => ", list_acc)
     return list_acc
 
 def main():
