@@ -498,6 +498,7 @@ def main():
 
     # Get the subset of data depending on training or cross-validation mode
 
+    args.online_cross_val = False
     if args.online_cross_val:
         num_tasks = K_FOR_CROSS_VAL
     else:
