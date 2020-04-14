@@ -353,7 +353,7 @@ def train_task_sequence(model, sess, args):
                         update_reservior(er_x, er_y_, episodic_images, episodic_labels, episodic_mem_size, examples_seen_so_far)
                         examples_seen_so_far += 1
 
-                if (iters % 100 == 0):
+                if (iters % 1000 == 0):
                     print('Step {:d} {:.3f}'.format(iters, loss))
 
                 if (math.isnan(loss)):
