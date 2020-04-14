@@ -493,8 +493,8 @@ def _get_cifar(data_dir, is_cifar_100):
         x_validation = _X[40000:]
         y_validation = _Y[40000:]
     else:
-    	# Load all the training batches of the CIFAR-10
-    	for i in range(5):
+        # Load all the training batches of the CIFAR-10
+        for i in range(5):
             f = open(data_dir + CIFAR_10_DIR + '/data_batch_' + str(i + 1), 'rb')
             datadict = pickle.load(f)
             f.close()
@@ -511,8 +511,8 @@ def _get_cifar(data_dir, is_cifar_100):
                 x_train = _X
                 y_train = _Y
             else:
-            	x_train = np.concatenate((x_train, _X), axis=0)
-            	y_train = np.concatenate((y_train, _Y), axis=0)
+                x_train = np.concatenate((x_train, _X), axis=0)
+                y_train = np.concatenate((y_train, _Y), axis=0)
     
         # Compute the data mean for normalization
         x_train_mean = np.mean(x_train, axis=0)
