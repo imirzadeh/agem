@@ -31,11 +31,12 @@ from model import Model
 ###############################################################
 
 ## Training Options
+EPOCHS_PER_TASK = 5
 NUM_RUNS = 10           # Number of experiments to average over
 TRAIN_ITERS = 5000      # Number of training iterations per task
 BATCH_SIZE = 16
 LEARNING_RATE = 1e-3    
-RANDOM_SEED = 1234
+RANDOM_SEED = 1235
 VALID_OPTIMS = ['SGD', 'MOMENTUM', 'ADAM']
 OPTIM = 'SGD'
 OPT_POWER = 0.9
@@ -49,7 +50,7 @@ IMP_METHOD = 'EWC'
 SYNAP_STGTH = 75000
 FISHER_EMA_DECAY = 0.9      # Exponential moving average decay factor for Fisher computation (online Fisher)
 FISHER_UPDATE_AFTER = 10    # Number of training iterations for which the F_{\theta}^t is computed (see Eq. 10 in RWalk paper) 
-SAMPLES_PER_CLASS = 10    # Number of samples per task
+SAMPLES_PER_CLASS = 1    # Number of samples per task
 INPUT_FEATURE_SIZE = 784
 IMG_HEIGHT = 28
 IMG_WIDTH = 28
@@ -69,7 +70,7 @@ LOG_DIR = './permute_mnist_results'
 ## Evaluation options
 
 ## Num Tasks
-NUM_TASKS = 5
+NUM_TASKS = 20
 MULTI_TASK = False
 
 def get_arguments():
@@ -225,7 +226,7 @@ def train_task_sequence(model, sess, args):
             if args.train_single_epoch:
                 num_iters = num_train_examples // batch_size
             else:
-                num_iters = int(5*(num_train_examples // batch_size))
+                num_iters = int(EPOCHS_PER_TASK*(num_train_examples // batch_size))
 
             # Training loop for task T
             for iters in range(num_iters):
