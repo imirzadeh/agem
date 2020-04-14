@@ -41,7 +41,7 @@ def snapshot_experiment_meta_data(logdir, experiment_id, exper_meta_data):
     Store the meta-data of the experiment in a file
     """
     meta_file = logdir + '/' + experiment_id + '.txt'
-    with open(meta_file, 'wb') as f:
+    with open(meta_file, 'w') as f:
         for key in exper_meta_data:
             print('{}: {}'.format(key, exper_meta_data[key]))
             f.write('{}:{} \n'.format(key, exper_meta_data[key]))
