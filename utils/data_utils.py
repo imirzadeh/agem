@@ -103,7 +103,7 @@ def _AWA_read_img_from_file(data_dir, file_name, img_height, img_width):
             count += 1
 
             if count % 1000 == 0:
-                print 'Finish reading {:07d}'.format(count)
+                print('Finish reading {:07d}'.format(count))
 
     # Convert the labels to one-hot
     y = dense_to_one_hot(np.array(labels))
@@ -258,7 +258,7 @@ def _CUB_read_img_from_file(data_dir, file_name, img_height, img_width):
             count += 1
 
             if count % 1000 == 0:
-                print 'Finish reading {:07d}'.format(count)
+                print('Finish reading {:07d}'.format(count))
 
     # Convert the labels to one-hot
     y = dense_to_one_hot(np.array(labels))
