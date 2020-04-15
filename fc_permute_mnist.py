@@ -31,7 +31,7 @@ from model import Model
 ###############################################################
 
 ## Training Options
-EPOCHS_PER_TASK = 5
+EPOCHS_PER_TASK = 1
 NUM_RUNS = 10           # Number of experiments to average over
 TRAIN_ITERS = 5000      # Number of training iterations per task
 BATCH_SIZE = 16
