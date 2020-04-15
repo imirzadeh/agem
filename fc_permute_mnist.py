@@ -20,11 +20,11 @@ import tensorflow as tf
 from copy import deepcopy
 from six.moves import cPickle as pickle
 
-from utils.data_utils import construct_permute_mnist
+from utils.data_utils import construct_permute_mnist, construct_rotate_mnist
 from utils.utils import get_sample_weights, sample_from_dataset, update_episodic_memory, concatenate_datasets, samples_for_each_class, sample_from_dataset_icarl, compute_fgt, update_reservior
 from utils.vis_utils import plot_acc_multiple_runs, plot_histogram, snapshot_experiment_meta_data, snapshot_experiment_eval
 from model import Model
-
+    
 ###############################################################
 ################ Some definitions #############################
 ### These will be edited by the command line options ##########
@@ -147,7 +147,7 @@ def train_task_sequence(model, sess, args):
         np.random.seed(args.random_seed+runid)
 
         # Load the permute mnist dataset
-        datasets = construct_permute_mnist(model.num_tasks)
+        datasets = construct_rotate_mnist(model.num_tasks)#construct_permute_mnist(model.num_tasks)
 
         print("total datasets => ", len(datasets))
         episodic_mem_size = args.mem_size*model.num_tasks*TOTAL_CLASSES
