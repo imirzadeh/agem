@@ -19,7 +19,6 @@ from six.moves import cPickle as pickle
 import tarfile
 import zipfile
 import random
-from PIL import Image
 import cv2
 from scipy import ndimage
 import matplotlib
