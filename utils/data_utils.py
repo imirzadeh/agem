@@ -19,7 +19,12 @@ from six.moves import cPickle as pickle
 import tarfile
 import zipfile
 import random
+from PIL import Image
 import cv2
+from scipy import ndimage
+import matplotlib
+matplotlib.use('Agg')
+import matplotlib.pyplot as plt
 
 #IMG_MEAN = np.array((104.00698793,116.66876762,122.67891434), dtype=np.float32)
 IMG_MEAN = np.array((103.94,116.78,123.68), dtype=np.float32)
@@ -67,301 +72,6 @@ def random_horizontal_flip(x):
             for _ in xrange(x.shape[0])]
     random_flipped = np.array([img[flip] for img, flip in zip(x, flips)])
     return random_flipped
-
-############################################################
-### AWA dataset utils #####################################
-############################################################
-def _AWA_read_img_from_file(data_dir, file_name, img_height, img_width):
-    count = 0
-    imgs = []
-    labels = []
-
-    def dense_to_one_hot(labels_dense, num_classes=50):
-        num_labels = labels_dense.shape[0]
-        index_offset = np.arange(num_labels) * num_classes
-        labels_one_hot = np.zeros((num_labels, num_classes))
-        labels_one_hot.flat[index_offset + labels_dense.ravel()] = 1
-
-        return labels_one_hot
-
-    with open(file_name) as f:
-        for line in f:
-            img_name, img_label = line.split()
-            img_file = data_dir.rstrip('\/') + '/' + img_name
-            img = cv2.imread(img_file).astype(np.float32)
-            # HWC -> WHC, compatible with caffe weights
-            #img = np.transpose(img, [1, 0, 2])
-            img = cv2.resize(img, (img_width, img_height))
-            # Convert RGB to BGR
-            img_r, img_g, img_b = np.split(img, 3, axis=2)
-            img = np.concatenate((img_b, img_g, img_r), axis=2)
-            # Extract mean
-            img -= IMG_MEAN
-
-            imgs += [img]
-            labels += [int(img_label)]
-            count += 1
-
-            if count % 1000 == 0:
-                print('Finish reading {:07d}'.format(count))
-
-    # Convert the labels to one-hot
-    y = dense_to_one_hot(np.array(labels))
-
-    return np.array(imgs), y
-
-
-def _AWA_get_data(data_dir, train_list_file, val_list_file, test_list_file, img_height, img_width):
-    """ Reads and parses examples from AWA dataset """
-
-    dataset = dict()
-    dataset['train'] = []
-    dataset['validation'] = []
-    dataset['test'] = []
-
-    num_val_img = 0   # you can change the number of validation images here TODO: Pass this as argument
-
-    train_img = []
-    train_label = []
-    validation_img = []
-    validation_label = []
-    test_img = []
-    test_label = []
-
-    # Read train, validation and test files
-    train_img, train_label = _AWA_read_img_from_file(data_dir, train_list_file, img_height, img_width)
-    #validation_img, validation_label = _AWA_read_img_from_file(data_dir, val_list_file, img_height, img_width)
-    test_img, test_label = _AWA_read_img_from_file(data_dir, test_list_file, img_height, img_width)
-
-    dataset['train'].append(train_img)
-    dataset['train'].append(train_label)
-    #dataset['validation'].append(validation_img)
-    #dataset['validation'].append(validation_label)
-    dataset['test'].append(test_img)
-    dataset['test'].append(test_label)
-
-    return dataset
-
-
-def construct_split_awa(task_labels, data_dir, train_list_file, val_list_file, test_list_file, img_height, img_width, attr_file=None):
-    """
-    Construct Split AWA dataset
-
-    Args:
-        task_labels         Labels of different tasks
-        data_dir            Data directory from where the AWA dataset will be read
-        train_list_file     File containing names of training images
-        al_list_file        File containing names of val images
-        test_list_file      File containing names of test images
-        img_height          Height of image
-        img_width           Width of image
-        attr_file           File from where to load the attributes
-    """
-
-    # Get the awa dataset
-    awa_data = _AWA_get_data(data_dir, train_list_file, val_list_file, test_list_file, img_height, img_width)
-
-    # Get the attribute vector
-    if attr_file:
-        with open(attr_file, 'rb') as f:
-            awa_attr = pickle.load(f)
-
-    # Define a list for storing the data for different tasks
-    datasets = []
-
-    # Data splits
-    #sets = ["train", "validation", "test"]
-    sets = ["train", "test"]
-
-    for task in task_labels:
-
-        for set_name in sets:
-            this_set = awa_data[set_name]
-
-            global_class_indices = np.column_stack(np.nonzero(this_set[1]))
-            count = 0
-
-            for cls in task:
-                if count == 0:
-                    class_indices = np.squeeze(global_class_indices[global_class_indices[:,1] ==
-                                                                    cls][:,np.array([True, False])])
-                else:
-                    class_indices = np.append(class_indices, np.squeeze(global_class_indices[global_class_indices[:,1] ==\
-                                                                                 cls][:,np.array([True, False])]))
-
-                count += 1
-
-            class_indices = np.sort(class_indices, axis=None)
-
-            if set_name == "train":
-                train = {
-                    'images':deepcopy(this_set[0][class_indices, :]),
-                    'labels':deepcopy(this_set[1][class_indices, :]),
-                }
-            elif set_name == "validation":
-                validation = {
-                    'images':deepcopy(this_set[0][class_indices, :]),
-                    'labels':deepcopy(this_set[1][class_indices, :]),
-                }
-            elif set_name == "test":
-                test = {
-                    'images':deepcopy(this_set[0][class_indices, :]),
-                    'labels':deepcopy(this_set[1][class_indices, :]),
-                }
-
-        awa = {
-            'train': train,
-            #'validation': validation,
-            'test': test,
-        }
-
-        datasets.append(awa)
-
-    if attr_file:
-        return datasets, awa_attr 
-    else:
-        return datasets
-
-
-############################################################
-### CUB dataset utils #####################################
-############################################################
-def _CUB_read_img_from_file(data_dir, file_name, img_height, img_width):
-    count = 0
-    imgs = []
-    labels = []
-
-    def dense_to_one_hot(labels_dense, num_classes=200):
-        num_labels = labels_dense.shape[0]
-        index_offset = np.arange(num_labels) * num_classes
-        labels_one_hot = np.zeros((num_labels, num_classes))
-        labels_one_hot.flat[index_offset + labels_dense.ravel()] = 1
-
-        return labels_one_hot
-
-    with open(file_name) as f:
-        for line in f:
-            img_name, img_label = line.split()
-            img_file = data_dir.rstrip('\/') + '/' + img_name
-            img = cv2.imread(img_file).astype(np.float32)
-            # HWC -> WHC, compatible with caffe weights
-            #img = np.transpose(img, [1, 0, 2])
-            img = cv2.resize(img, (img_width, img_height))
-            # Convert RGB to BGR
-            img_r, img_g, img_b = np.split(img, 3, axis=2)
-            img = np.concatenate((img_b, img_g, img_r), axis=2)
-            # Extract mean
-            img -= IMG_MEAN
-
-            imgs += [img]
-            labels += [int(img_label)]
-            count += 1
-
-            if count % 1000 == 0:
-                print('Finish reading {:07d}'.format(count))
-
-    # Convert the labels to one-hot
-    y = dense_to_one_hot(np.array(labels))
-
-    return np.array(imgs), y
-
-
-def _CUB_get_data(data_dir, train_list_file, test_list_file, img_height, img_width):
-    """ Reads and parses examples from CUB dataset """
-
-    dataset = dict()
-    dataset['train'] = []
-    dataset['test'] = []
-
-    num_val_img = 0   # you can change the number of validation images here TODO: Pass this as argument
-
-    train_img = []
-    train_label = []
-    test_img = []
-    test_label = []
-
-    # Read train and test files
-    train_img, train_label = _CUB_read_img_from_file(data_dir, train_list_file, img_height, img_width)
-    test_img, test_label = _CUB_read_img_from_file(data_dir, test_list_file, img_height, img_width)
-
-    dataset['train'].append(train_img)
-    dataset['train'].append(train_label)
-    dataset['test'].append(test_img)
-    dataset['test'].append(test_label)
-
-    return dataset
-
-
-def construct_split_cub(task_labels, data_dir, train_list_file, test_list_file, img_height, img_width, attr_file=None):
-    """
-    Construct Split CUB-200 dataset
-
-    Args:
-        task_labels         Labels of different tasks
-        data_dir            Data directory from where the CUB-200 dataset will be read
-        train_list_file     File containing names of training images
-        test_list_file      File containing names of test images
-        img_height          Height of image
-        img_width           Width of image
-        attr_fil            File from where to load the attributes
-    """
-
-    # Get the cub dataset
-    cub_data = _CUB_get_data(data_dir, train_list_file, test_list_file, img_height, img_width)
-
-    # Get the attribute vector
-    if attr_file:
-        with open(attr_file, 'rb') as f:
-            cub_attr = pickle.load(f)
-
-    # Define a list for storing the data for different tasks
-    datasets = []
-
-    # Data splits
-    sets = ["train", "test"]
-
-    for task in task_labels:
-
-        for set_name in sets:
-            this_set = cub_data[set_name]
-
-            global_class_indices = np.column_stack(np.nonzero(this_set[1]))
-            count = 0
-
-            for cls in task:
-                if count == 0:
-                    class_indices = np.squeeze(global_class_indices[global_class_indices[:,1] ==
-                                                                    cls][:,np.array([True, False])])
-                else:
-                    class_indices = np.append(class_indices, np.squeeze(global_class_indices[global_class_indices[:,1] ==\
-                                                                                 cls][:,np.array([True, False])]))
-
-                count += 1
-
-            class_indices = np.sort(class_indices, axis=None)
-
-            if set_name == "train":
-                train = {
-                    'images':deepcopy(this_set[0][class_indices, :]),
-                    'labels':deepcopy(this_set[1][class_indices, :]),
-                }
-            elif set_name == "test":
-                test = {
-                    'images':deepcopy(this_set[0][class_indices, :]),
-                    'labels':deepcopy(this_set[1][class_indices, :]),
-                }
-
-        cub = {
-            'train': train,
-            'test': test,
-        }
-
-        datasets.append(cub)
-
-    if attr_file:
-        return datasets, cub_attr 
-    else:
-        return datasets
 
 ############################################################
 ### CIFAR download utils ###################################
@@ -643,6 +353,53 @@ def reformat_mnist(datasets):
 
     return datasets
 
+
+def rotate_image_by_angle(img, angle=45):
+    WIDTH, HEIGHT = 28 , 28
+    img = img.reshape((WIDTH, HEIGHT))
+    img = ndimage.rotate(img, angle, reshape=False, order=0)
+    out = np.array(img).flatten()
+    return out
+
+def construct_rotate_mnist(num_tasks):
+    mnist = input_data.read_data_sets('MNIST_data', one_hot=True)
+    datasets = []
+
+    for i in range(num_tasks):
+        per_task_rotation = 180.0 / num_tasks
+        rotation_degree = (i - 1)*per_task_rotation
+        rotation_degree -= (np.random.random()*per_task_rotation)
+        copied_mnist = deepcopy(mnist)
+        sets = ["train", "validation", "test"]
+        for set_name in sets:
+            this_set = getattr(copied_mnist, set_name) # shallow copy
+
+            rotate_image_by_angle(this_set._images[0])
+            this_set._images = np.array([rotate_image_by_angle(img, rotation_degree) for img in this_set._images])
+            if set_name == "train":
+                train = { 
+                    'images':this_set._images,
+                    'labels':this_set.labels,
+                }
+            elif set_name == "validation":
+                validation = {
+                    'images':this_set._images,
+                    'labels':this_set.labels,
+                }
+            elif set_name == "test":
+                test = {
+                    'images':this_set._images,
+                    'labels':this_set.labels,
+                }
+        dataset = {
+            'train': train,
+            'validation': validation,
+            'test': test,
+        }
+
+        datasets.append(dataset)
+
+    return datasets
 def construct_permute_mnist(num_tasks):
     """
     Construct a dataset of permutted mnist images
@@ -665,6 +422,7 @@ def construct_permute_mnist(num_tasks):
         for set_name in sets:
             this_set = getattr(copied_mnist, set_name) # shallow copy
             this_set._images = np.transpose(np.array([this_set.images[:,c] for c in perm_inds]))
+            # print(this_set._images.shape)
             if set_name == "train":
                 train = { 
                     'images':this_set._images,
@@ -893,3 +651,7 @@ def _load_imagenet(data_dir):
 
 
     return dataset
+
+if __name__ == "__main__":
+    construct_rotate_mnist(20)
+    # rotate_image_by_angle(np.array([[0.0, 0.0, 0.0, 0.0], [0.0, 1.0, 1.0, 1.0], [0.0, 0.0, 0.0, 0.0], [0.0, 0.0, 0.0, 0.0]]))
