@@ -205,7 +205,7 @@ def _get_cifar(data_dir, is_cifar_100):
         # Load all the training batches of the CIFAR-10
         for i in range(5):
             f = open(data_dir + CIFAR_10_DIR + '/data_batch_' + str(i + 1), 'rb')
-            datadict = pickle.load(f)
+            datadict = pickle.load(f, encoding='latin1')
             f.close()
             
             _X = datadict['data']
@@ -243,7 +243,7 @@ def _get_cifar(data_dir, is_cifar_100):
     if is_cifar_100:
         # Load the test batch of CIFAR-100
         f = open(data_dir + CIFAR_100_DIR + '/test', 'rb')
-        datadict = pickle.load(f)
+        datadict = pickle.load(f, encoding='latin1')
         f.close()
     
         _X = datadict['data']
@@ -252,7 +252,7 @@ def _get_cifar(data_dir, is_cifar_100):
     else:
         # Load the test batch of CIFAR-10
         f = open(data_dir + CIFAR_10_DIR + '/test_batch', 'rb')
-        datadict = pickle.load(f)
+        datadict = pickle.load(f, encoding='latin1')
         f.close()
 
         _X = datadict["data"]
@@ -599,7 +599,7 @@ def _load_imagenet(data_dir):
     # Load the training batches
     for i in range(4):
         f = open(data_dir + '/train_batch_' + str(i), 'rb')
-        datadict = pickle.load(f)
+        datadict = pickle.load(f, encoding='latin1')
         f.close()
 
         _X = datadict['data']
@@ -625,7 +625,7 @@ def _load_imagenet(data_dir):
     # Load test batches
     for i in range(4):
         f = open(data_dir + '/test_batch_' + str(i), 'rb')
-        datadict = pickle.load(f)
+        datadict = pickle.load(f, encoding='latin1')
         f.close()
 
         _X = datadict['data']
