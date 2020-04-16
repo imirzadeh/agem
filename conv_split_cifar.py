@@ -111,7 +111,7 @@ def get_arguments():
       A list of parsed arguments.
     """
     parser = argparse.ArgumentParser(description="Script for split cifar experiment.")
-    parser.add_argument("--cross-validate-mode", action="store_true",
+    parser.add_argument("--cross-validate-mode", action="store_false",
             help="If option is chosen then snapshoting after each batch is disabled")
     parser.add_argument("--online-cross-val", action="store_true",
             help="If option is chosen then enable the online cross validation of the learning rate")
