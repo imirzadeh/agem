@@ -70,7 +70,7 @@ RESNET18_CIFAR10_CHECKPOINT = './resnet-18-pretrained-cifar10/model.ckpt-19999'
 ## Evaluation options
 
 ## Task split
-NUM_TASKS = 20
+NUM_TASKS = 23
 MULTI_TASK = False
 
 
@@ -113,7 +113,7 @@ def get_arguments():
     parser = argparse.ArgumentParser(description="Script for split cifar experiment.")
     parser.add_argument("--cross-validate-mode", action="store_false",
             help="If option is chosen then snapshoting after each batch is disabled")
-    parser.add_argument("--online-cross-val", action="store_true",
+    parser.add_argument("--online-cross-val", action="store_false",
             help="If option is chosen then enable the online cross validation of the learning rate")
     parser.add_argument("--train-single-epoch", action="store_true", 
             help="If option is chosen then train for single epoch")
