@@ -182,7 +182,7 @@ def _get_cifar(data_dir, is_cifar_100):
     if is_cifar_100:
         # Load the training data of CIFAR-100
         f = open(data_dir + CIFAR_100_DIR + '/train', 'rb')
-        datadict = pickle.load(f)
+        datadict = pickle.load(f, encoding='latin1')
         f.close()
     
         _X = datadict['data']
