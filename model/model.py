@@ -1,3 +1,8 @@
+# Copyright (c) Facebook, Inc. and its affiliates. All Rights Reserved
+#
+# This source code is licensed under the license found in the
+# LICENSE file in the root directory of this source tree.
+
 """
 Model defintion
 """                                        
@@ -7,11 +12,14 @@ import numpy as np
 import matplotlib.pyplot as plt
 from IPython import display
 from utils import clone_variable_list, create_fc_layer, create_conv_layer
+from utils.resnet_utils import _conv, _fc, _bn, _residual_block, _residual_block_first 
+from utils.vgg_utils import vgg_conv_layer, vgg_fc_layer
 
 PARAM_XI_STEP = 1e-3
 NEG_INF = -1e32
 EPSILON = 1e-32
-STOP_GRADIENTS = False
+HYBRID_ALPHA = 0.5
+TRAIN_ENTROPY_BASED_SUM = False
 
 def weight_variable(shape, name='fc', init_type='default'):
     """
@@ -52,17 +60,26 @@ class Model:
     A class defining the model
     """
 
-    def __init__(self, x_, y_, num_tasks, opt, imp_method, synap_stgth, fisher_update_after, fisher_ema_decay, model_learning_rate, 
-                 network_arch='FC-S', is_ATT_DATASET=False, x_test=None, attr=None, anchor_xx=None, anchor_eta=0.1, anchor_points=None):
+    def __init__(self, x_train, y_, num_tasks, opt, imp_method, synap_stgth, fisher_update_after, fisher_ema_decay, network_arch='FC-S', 
+            is_ATT_DATASET=False, x_test=None, attr=None):
         """
         Instantiate the model
         """
         # Define some placeholders which are used to feed the data to the model
-        self.x = x_
         self.y_ = y_
-        self.total_classes = int(self.y_.get_shape()[1])
-        self.learning_rate = model_learning_rate
-        self.output_mask = tf.placeholder(dtype=tf.float32, shape=[self.total_classes])
+        if imp_method == 'PNN':
+            self.train_phase = []
+            self.total_classes = int(self.y_[0].get_shape()[1])
+            self.train_phase = [tf.placeholder(tf.bool, name='train_phase_%d'%(i)) for i in range(num_tasks)]
+            self.output_mask = [tf.placeholder(dtype=tf.float32, shape=[self.total_classes]) for i in range(num_tasks)]
+        else:
+            self.total_classes = int(self.y_.get_shape()[1])
+            self.train_phase = tf.placeholder(tf.bool, name='train_phase')
+            if (imp_method == 'A-GEM' or imp_method == 'ER') and 'FC-' not in network_arch: # Only for Split-X setups
+                self.output_mask = [tf.placeholder(dtype=tf.float32, shape=[self.total_classes]) for i in range(num_tasks)]
+                self.mem_batch_size = tf.placeholder(dtype=tf.float32, shape=())
+            else:
+                self.output_mask = tf.placeholder(dtype=tf.float32, shape=[self.total_classes])
         self.sample_weights = tf.placeholder(tf.float32, shape=[None])
         self.task_id = tf.placeholder(dtype=tf.int32, shape=())
         self.store_grad_batches = tf.placeholder(dtype=tf.float32, shape=())
@@ -71,13 +88,23 @@ class Model:
         self.training_iters = tf.placeholder(dtype=tf.float32, shape=())
         self.train_step = tf.placeholder(dtype=tf.float32, shape=())
         self.violation_count = tf.Variable(0, dtype=tf.float32, trainable=False)
+        self.is_ATT_DATASET = is_ATT_DATASET # To use a different (standard one) ResNet-18 for CUB
+        if x_test is not None:
+            # If CUB datatset then use augmented x (x_train) for training and non-augmented x (x_test) for testing
+            self.x = tf.cond(self.train_phase, lambda: tf.identity(x_train), lambda: tf.identity(x_test))
+            train_shape = x_train.get_shape().as_list()
+            x = tf.reshape(self.x, [-1, train_shape[1], train_shape[2], train_shape[3]])
+        else:
+            # We don't use data augmentation for other datasets
+            self.x = x_train
+            x = self.x
 
-        # Hindsight anchors
-        self.anchor_xx = anchor_xx
-        self.anchor_eta = anchor_eta
-        self.anchor_points = anchor_points
-        self.anchor_opt = tf.train.AdamOptimizer(learning_rate=0.001)
+        # Class attributes for zero shot transfer
+        self.class_attr = attr
 
+        if self.class_attr is not None:
+            self.attr_dims = int(self.class_attr.get_shape()[1])
+        
         # Save the arguments passed from the main script
         self.opt = opt
         self.num_tasks = num_tasks
@@ -88,6 +115,7 @@ class Model:
 
         # A scalar variable for previous syanpse strength
         self.synap_stgth = tf.constant(synap_stgth, shape=[1], dtype=tf.float32)
+        self.triplet_loss_scale = 2.1
 
         # Define different variables
         self.weights_old = []
@@ -109,11 +137,11 @@ class Model:
         self.weights_delta_old_vars = []
         self.ref_grads = []
         self.projected_gradients_list = []
-        self.theta_not_a = [] # MER
-        self.theta_i_not_w = [] # MER
-        self.theta_i_a = [] # MER
 
-        self.loss_and_train_ops_for_one_hot_vector(self.x, self.y_)
+        if self.class_attr is not None:
+            self.loss_and_train_ops_for_attr_vector(x, self.y_)
+        else:
+            self.loss_and_train_ops_for_one_hot_vector(x, self.y_)
 
         # Set the operations to reset the optimier when needed
         self.reset_optimizer_ops()
@@ -129,18 +157,79 @@ class Model:
         if self.network_arch == 'FC-S':
             input_dim = int(x.get_shape()[1])
             layer_dims = [input_dim, 256, 256, self.total_classes]
-            self.fc_variables(layer_dims)
-            logits = self.fc_feedforward(x, self.trainable_vars)
+            if self.imp_method == 'PNN':
+                self.task_logits = []
+                self.task_pruned_logits = []
+                self.unweighted_entropy = []
+                for i in range(self.num_tasks):
+                    if i == 0:
+                        self.task_logits.append(self.init_fc_column_progNN(layer_dims, x))
+                        self.task_pruned_logits.append(tf.where(tf.tile(tf.equal(self.output_mask[i][None,:], 1.0), [tf.shape(self.task_logits[i])[0], 1]), self.task_logits[i], NEG_INF*tf.ones_like(self.task_logits[i])))
+                        self.unweighted_entropy.append(tf.squeeze(tf.reduce_mean(tf.nn.softmax_cross_entropy_with_logits_v2(labels=y_[i], logits=self.task_pruned_logits[i])))) # mult by mean(y_[i]) puts unwaranted loss to 0
+                    else:
+                        self.task_logits.append(self.extensible_fc_column_progNN(layer_dims, x, i))
+                        self.task_pruned_logits.append(tf.where(tf.tile(tf.equal(self.output_mask[i][None,:], 1.0), [tf.shape(self.task_logits[i])[0], 1]), self.task_logits[i], NEG_INF*tf.ones_like(self.task_logits[i])))
+                        self.unweighted_entropy.append(tf.squeeze(tf.reduce_mean(tf.nn.softmax_cross_entropy_with_logits_v2(labels=y_[i], logits=self.task_pruned_logits[i])))) # mult by mean(y_[i]) puts unwaranted loss to 0
+            else:
+                self.fc_variables(layer_dims)
+                logits = self.fc_feedforward(x, self.weights, self.biases)
 
         elif self.network_arch == 'FC-B':
             input_dim = int(x.get_shape()[1])
             layer_dims = [input_dim, 2000, 2000, self.total_classes]
             self.fc_variables(layer_dims)
-            logits = self.fc_feedforward(x, self.trainable_vars)
+            logits = self.fc_feedforward(x, self.weights, self.biases)
 
+        elif self.network_arch == 'CNN':
+            num_channels = int(x.get_shape()[-1])
+            self.image_size = int(x.get_shape()[1])
+            kernels = [3, 3, 3, 3, 3]
+            depth = [num_channels, 32, 32, 64, 64, 512]
+            self.conv_variables(kernels, depth)
+            logits = self.conv_feedforward(x, self.weights, self.biases, apply_dropout=True)
 
-        # Define operations for computing the running average of the class specific features
-        self.running_average_of_features()
+        elif self.network_arch == 'VGG':
+            # VGG-16
+            logits = self.vgg_16_conv_feedforward(x)
+            
+        elif 'RESNET-' in self.network_arch:
+            if self.network_arch == 'RESNET-S':
+                # Same resnet-18 as used in GEM paper
+                kernels = [3, 3, 3, 3, 3]
+                filters = [20, 20, 40, 80, 160]
+                strides = [1, 0, 2, 2, 2]
+            elif self.network_arch == 'RESNET-B':
+                # Standard ResNet-18
+                kernels = [7, 3, 3, 3, 3]
+                filters = [64, 64, 128, 256, 512]
+                strides = [2, 0, 2, 2, 2]
+            if self.imp_method == 'PNN':
+                self.task_logits = []
+                self.task_pruned_logits = []
+                self.unweighted_entropy = []
+                for i in range(self.num_tasks):
+                    if i == 0:
+                        self.task_logits.append(self.init_resent_column_progNN(x, kernels, filters, strides))
+                    else:
+                        self.task_logits.append(self.extensible_resnet_column_progNN(x, kernels, filters, strides, i))
+                    self.task_pruned_logits.append(tf.where(tf.tile(tf.equal(self.output_mask[i][None,:], 1.0), [tf.shape(self.task_logits[i])[0], 1]), self.task_logits[i], NEG_INF*tf.ones_like(self.task_logits[i])))
+                    self.unweighted_entropy.append(tf.squeeze(tf.reduce_mean(tf.nn.softmax_cross_entropy_with_logits_v2(labels=y_[i], logits=self.task_pruned_logits[i]))))
+            elif self.imp_method == 'A-GEM' or self.imp_method == 'ER':
+                logits = self.resnet18_conv_feedforward(x, kernels, filters, strides)
+                self.task_pruned_logits = []
+                self.unweighted_entropy = []
+                for i in range(self.num_tasks):
+                    self.task_pruned_logits.append(tf.where(tf.tile(tf.equal(self.output_mask[i][None,:], 1.0), [tf.shape(logits)[0], 1]), logits, NEG_INF*tf.ones_like(logits)))
+                    cross_entropy = tf.nn.softmax_cross_entropy_with_logits_v2(labels=y_, logits=self.task_pruned_logits[i])
+                    adjusted_entropy = tf.reduce_sum(tf.cast(tf.tile(tf.equal(self.output_mask[i][None,:], 1.0), [tf.shape(y_)[0], 1]), dtype=tf.float32) * y_, axis=1) * cross_entropy
+                    self.unweighted_entropy.append(tf.reduce_sum(adjusted_entropy)) # We will average it later on
+            else:
+                logits = self.resnet18_conv_feedforward(x, kernels, filters, strides)
+
+        # Prune the predictions to only include the classes for which
+        # the training data is present
+        if (self.imp_method != 'PNN') and ((self.imp_method != 'A-GEM' and self.imp_method != 'ER') or 'FC-' in self.network_arch):
+            self.pruned_logits = tf.where(tf.tile(tf.equal(self.output_mask[None,:], 1.0), [tf.shape(logits)[0], 1]), logits, NEG_INF*tf.ones_like(logits))
 
         # Create list of variables for storing different measures
         # Note: This method has to be called before calculating fisher 
@@ -148,17 +237,19 @@ class Model:
         self.init_vars()
 
         # Different entropy measures/ loss definitions
-        self.mse = 2.0*tf.nn.l2_loss(logits) # tf.nn.l2_loss computes sum(T**2)/ 2
-        self.weighted_entropy = tf.reduce_mean(tf.losses.softmax_cross_entropy(y_, 
-            logits, self.sample_weights, reduction=tf.losses.Reduction.NONE))
-        self.unweighted_entropy = tf.reduce_mean(tf.nn.softmax_cross_entropy_with_logits_v2(labels=y_, 
-            logits=logits))
+        if (self.imp_method != 'PNN') and ((self.imp_method != 'A-GEM' and self.imp_method != 'ER') or 'FC-' in self.network_arch):
+            self.mse = 2.0*tf.nn.l2_loss(self.pruned_logits) # tf.nn.l2_loss computes sum(T**2)/ 2
+            self.weighted_entropy = tf.reduce_mean(tf.losses.softmax_cross_entropy(y_, 
+                self.pruned_logits, self.sample_weights, reduction=tf.losses.Reduction.NONE))
+            self.unweighted_entropy = tf.reduce_mean(tf.nn.softmax_cross_entropy_with_logits_v2(labels=y_, 
+                logits=self.pruned_logits))
 
         # Create operations for loss and gradient calculation
         self.loss_and_gradients(self.imp_method)
 
-        # Store the current weights before doing a train step
-        self.get_current_weights()
+        if self.imp_method != 'PNN':
+            # Store the current weights before doing a train step
+            self.get_current_weights()
 
         # For GEM variants train ops will be defined later
         if 'GEM' not in self.imp_method:
@@ -181,24 +272,348 @@ class Model:
             self.create_hebbian_ops()
         elif self.imp_method == 'A-GEM' or self.imp_method == 'S-GEM':
             self.create_stochastic_gem_ops()
-        elif self.imp_method == 'MER':
-            self.mer_beta = tf.placeholder(dtype=tf.float32, shape=())
-            self.mer_gamma = tf.placeholder(dtype=tf.float32, shape=())
-            self.create_mer_ops()
+
+        if self.imp_method != 'PNN':
+            # Create weight save and store ops
+            self.weights_store_ops()
+
+            # Summary operations for visualization
+            tf.summary.scalar("unweighted_entropy", self.unweighted_entropy)
+            for v in self.trainable_vars:
+                tf.summary.histogram(v.name.replace(":", "_"), v)
+            self.merged_summary = tf.summary.merge_all()
+
+        # Accuracy measure
+        if (self.imp_method == 'PNN') or ((self.imp_method == 'A-GEM' or self.imp_method == 'ER') and 'FC-' not in self.network_arch):
+            self.correct_predictions = []
+            self.accuracy = []
+            for i in range(self.num_tasks):
+                if self.imp_method == 'PNN':
+                    self.correct_predictions.append(tf.equal(tf.argmax(self.task_pruned_logits[i], 1), tf.argmax(y_[i], 1)))
+                else:
+                    self.correct_predictions.append(tf.equal(tf.argmax(self.task_pruned_logits[i], 1), tf.argmax(y_, 1)))
+                self.accuracy.append(tf.reduce_mean(tf.cast(self.correct_predictions[i], tf.float32)))
+        else:
+            self.correct_predictions = tf.equal(tf.argmax(self.pruned_logits, 1), tf.argmax(y_, 1))
+            self.accuracy = tf.reduce_mean(tf.cast(self.correct_predictions, tf.float32))
+   
+    def loss_and_train_ops_for_attr_vector(self, x, y_): 
+        """
+        Loss and training operations for the training of joined embedding model
+        """
+        # Define approproate network
+        if self.network_arch == 'FC-S':
+            input_dim = int(x.get_shape()[1])
+            layer_dims = [input_dim, 256, 256, self.total_classes]
+            self.fc_variables(layer_dims)
+            logits = self.fc_feedforward(x, self.weights, self.biases)
+
+        elif self.network_arch == 'FC-B':
+            input_dim = int(x.get_shape()[1])
+            layer_dims = [input_dim, 2000, 2000, self.total_classes]
+            self.fc_variables(layer_dims)
+            logits = self.fc_feedforward(x, self.weights, self.biases)
+
+        elif self.network_arch == 'CNN':
+            num_channels = int(x.get_shape()[-1])
+            self.image_size = int(x.get_shape()[1])
+            kernels = [3, 3, 3, 3, 3]
+            depth = [num_channels, 32, 32, 64, 64, 512]
+            self.conv_variables(kernels, depth)
+            logits = self.conv_feedforward(x, self.weights, self.biases, apply_dropout=True)
+
+        elif self.network_arch == 'VGG':
+            # VGG-16
+            phi_x = self.vgg_16_conv_feedforward(x)
+            
+        elif self.network_arch == 'RESNET-S':
+            # Standard ResNet-18
+            kernels = [3, 3, 3, 3, 3]
+            filters = [20, 20, 40, 80, 160]
+            strides = [1, 0, 2, 2, 2]
+            # Get the image features
+            phi_x = self.resnet18_conv_feedforward(x, kernels, filters, strides)
+
+        elif self.network_arch == 'RESNET-B':
+            # Standard ResNet-18
+            kernels = [7, 3, 3, 3, 3]
+            filters = [64, 64, 128, 256, 512]
+            strides = [2, 0, 2, 2, 2]
+            # Get the image features
+            phi_x = self.resnet18_conv_feedforward(x, kernels, filters, strides)
+
+        # Get the attributes embedding
+        attr_embed = self.get_attribute_embedding(self.class_attr) # Does not contain biases yet, Dimension: TOTAL_CLASSES x image_feature_dim
+        # Add the biases now
+        last_layer_biases = bias_variable([self.total_classes], name='attr_embed_b')
+        self.trainable_vars.append(last_layer_biases)
+
+        # Now that we have all the trainable variables, initialize the different book keeping variables
+        # Note: This method has to be called before calculating fisher 
+        # or any other importance measure
+        self.init_vars()
+
+        # Compute the logits for the ZST case
+        zst_logits = tf.matmul(phi_x, tf.transpose(attr_embed)) + last_layer_biases
+        # Prune the predictions to only include the classes for which
+        # the training data is present
+        if self.imp_method == 'A-GEM':
+            pruned_zst_logits = []
+            self.unweighted_entropy = []
+            for i in range(self.num_tasks):
+                pruned_zst_logits.append(tf.where(tf.tile(tf.equal(self.output_mask[i][None,:], 1.0), [tf.shape(zst_logits)[0], 1]), zst_logits, NEG_INF*tf.ones_like(zst_logits)))
+                cross_entropy = tf.nn.softmax_cross_entropy_with_logits_v2(labels=y_, logits=pruned_zst_logits[i])
+                adjusted_entropy = tf.reduce_sum(tf.cast(tf.tile(tf.equal(self.output_mask[i][None,:], 1.0), [tf.shape(y_)[0], 1]), dtype=tf.float32) * y_, axis=1) * cross_entropy
+                self.unweighted_entropy.append(tf.reduce_sum(adjusted_entropy))
+        else:
+            pruned_zst_logits = tf.where(tf.tile(tf.equal(self.output_mask[None,:], 1.0), 
+                [tf.shape(zst_logits)[0], 1]), zst_logits, NEG_INF*tf.ones_like(zst_logits))
+            self.unweighted_entropy = tf.reduce_mean(tf.nn.softmax_cross_entropy_with_logits_v2(labels=y_, logits=pruned_zst_logits))
+            self.mse = 2.0*tf.nn.l2_loss(pruned_zst_logits) # tf.nn.l2_loss computes sum(T**2)/ 2
+
+        # Create operations for loss and gradient calculation
+        self.loss_and_gradients(self.imp_method)
+
+        # Store the current weights before doing a train step
+        self.get_current_weights()
+
+        if 'GEM' not in self.imp_method:
+            self.train_op()
+
+        # Create operations to compute importance depending on the importance methods
+        if self.imp_method == 'EWC':
+            self.create_fisher_ops()
+        elif self.imp_method == 'M-EWC':
+            self.create_fisher_ops()
+            self.create_pathint_ops()
+            self.combined_fisher_pathint_ops()
+        elif self.imp_method == 'PI':
+            self.create_pathint_ops()
+        elif self.imp_method == 'RWALK':
+            self.create_fisher_ops()
+            self.create_pathint_ops()
+        elif self.imp_method == 'MAS':
+            self.create_hebbian_ops()
+        elif (self.imp_method == 'A-GEM') or (self.imp_method == 'S-GEM'):
+            self.create_stochastic_gem_ops()
 
         # Create weight save and store ops
         self.weights_store_ops()
 
-        #  Summary operations for visualization
-        tf.summary.scalar("unweighted_entropy", self.unweighted_entropy)
+        # Summary operations for visualization
+        tf.summary.scalar("triplet_loss", self.unweighted_entropy)
         for v in self.trainable_vars:
             tf.summary.histogram(v.name.replace(":", "_"), v)
         self.merged_summary = tf.summary.merge_all()
 
-        self.correct_predictions = tf.equal(tf.argmax(logits, 1), tf.argmax(y_, 1))
-        self.accuracy = tf.reduce_mean(tf.cast(self.correct_predictions, tf.float32))
-    
-    
+        # Accuracy measure
+        if self.imp_method == 'A-GEM' and 'FC-' not in self.network_arch:
+            self.correct_predictions = []
+            self.accuracy = []
+            for i in range(self.num_tasks):
+                self.correct_predictions.append(tf.equal(tf.argmax(pruned_zst_logits[i], 1), tf.argmax(y_, 1)))
+                self.accuracy.append(tf.reduce_mean(tf.cast(self.correct_predictions[i], tf.float32)))
+        else:
+            self.correct_predictions = tf.equal(tf.argmax(pruned_zst_logits, 1), tf.argmax(y_, 1))
+            self.accuracy = tf.reduce_mean(tf.cast(self.correct_predictions, tf.float32))
+  
+    def init_fc_column_progNN(self, layer_dims, h, apply_dropout=False):
+        """
+        Defines the first column of Progressive NN - FC Networks
+        """
+        self.trainable_vars = []
+        self.h_pnn = []
+
+        self.trainable_vars.append([])
+        self.h_pnn.append([])
+        self.h_pnn[0].append(h)
+        for i in range(len(layer_dims)-1):
+            w = weight_variable([layer_dims[i], layer_dims[i+1]], name='fc_w_%d_t0'%(i))
+            b = bias_variable([layer_dims[i+1]], name='fc_b_%d_t0'%(i))
+            self.trainable_vars[0].append(w)
+            self.trainable_vars[0].append(b)
+            if i == len(layer_dims) - 2:
+                # Last layer (logits) - don't apply the relu
+                h = create_fc_layer(h, w, b, apply_relu=False)
+            else:
+                h = create_fc_layer(h, w, b)
+                if apply_dropout:
+                    h = tf.nn.dropout(h, 1)
+            self.h_pnn[0].append(h)
+
+        return h
+
+    def extensible_fc_column_progNN(self, layer_dims, h, task, apply_dropout=False):
+        """
+        Define the subsequent columns of the progressive NN - FC Networks
+        """
+        self.trainable_vars.append([])
+        self.h_pnn.append([])
+        self.h_pnn[task].append(h)
+        for i in range(len(layer_dims)-1):
+            w = weight_variable([layer_dims[i], layer_dims[i+1]], name='fc_w_%d_t%d'%(i, task))
+            b = bias_variable([layer_dims[i+1]], name='fc_b_%d_t%d'%(i, task))
+            self.trainable_vars[task].append(w)
+            self.trainable_vars[task].append(b)
+            preactivation = create_fc_layer(h, w, b, apply_relu=False)
+            for tt in range(task):
+                U_w = weight_variable([layer_dims[i], layer_dims[i+1]], name='fc_uw_%d_t%d_tt%d'%(i, task, tt))
+                U_b = bias_variable([layer_dims[i+1]], name='fc_ub_%d_t%d_tt%d'%(i, task, tt))
+                self.trainable_vars[task].append(U_w)
+                self.trainable_vars[task].append(U_b)
+                preactivation += create_fc_layer(self.h_pnn[tt][i], U_w, U_b, apply_relu=False)
+            if i == len(layer_dims) - 2:
+                # Last layer (logits) - don't apply the relu
+                h = preactivation
+            else:
+                # layer < last layer, apply relu
+                h = tf.nn.relu(preactivation)
+                if apply_dropout:
+                    h = tf.nn.dropout(h)
+            self.h_pnn[task].append(h)
+
+        return h
+
+    def init_resent_column_progNN(self, x, kernels, filters, strides):
+        """
+        Defines the first column of Progressive NN - ResNet-18
+        """
+        self.trainable_vars = []
+        self.h_pnn = []
+
+        self.trainable_vars.append([])
+        self.h_pnn.append([])
+        self.h_pnn[0].append(x)
+
+        # Conv1
+        h = _conv(x, kernels[0], filters[0], strides[0], self.trainable_vars[0], name='conv_1_t0')
+        h = _bn(h, self.trainable_vars[0], self.train_phase[0], name='bn_1_t0')
+        h = tf.nn.relu(h)
+        self.h_pnn[0].append(h)
+
+        # Conv2_x
+        h = _residual_block(h, self.trainable_vars[0], self.train_phase[0], name='conv2_1_t0')
+        h = _residual_block(h, self.trainable_vars[0], self.train_phase[0], name='conv2_2_t0')
+        self.h_pnn[0].append(h)
+
+        # Conv3_x
+        h = _residual_block_first(h, filters[2], strides[2], self.trainable_vars[0], self.train_phase[0], name='conv3_1_t0', is_ATT_DATASET=self.is_ATT_DATASET)
+        h = _residual_block(h, self.trainable_vars[0], self.train_phase[0], name='conv3_2_t0')
+        self.h_pnn[0].append(h)
+
+        # Conv4_x
+        h = _residual_block_first(h, filters[3], strides[3], self.trainable_vars[0], self.train_phase[0], name='conv4_1_t0', is_ATT_DATASET=self.is_ATT_DATASET)
+        h = _residual_block(h, self.trainable_vars[0], self.train_phase[0], name='conv4_2_t0')
+        self.h_pnn[0].append(h)
+
+        # Conv5_x
+        h = _residual_block_first(h, filters[4], strides[4], self.trainable_vars[0], self.train_phase[0], name='conv5_1_t0', is_ATT_DATASET=self.is_ATT_DATASET)
+        h = _residual_block(h, self.trainable_vars[0], self.train_phase[0], name='conv5_2_t0')
+        self.h_pnn[0].append(h)
+
+        # Apply average pooling
+        h = tf.reduce_mean(h, [1, 2])
+
+        if self.network_arch == 'RESNET-S':
+            logits = _fc(h, self.total_classes, self.trainable_vars[0], name='fc_1_t0', is_cifar=True)
+        else:
+            logits = _fc(h, self.total_classes, self.trainable_vars[0], name='fc_1_t0')
+        self.h_pnn[0].append(logits)
+        
+        return logits
+
+    def extensible_resnet_column_progNN(self, x, kernels, filters, strides, task):
+        """
+        Define the subsequent columns of the progressive NN - ResNet-18
+        """
+        self.trainable_vars.append([])
+        self.h_pnn.append([])
+        self.h_pnn[task].append(x)
+
+        # Conv1
+        h = _conv(x, kernels[0], filters[0], strides[0], self.trainable_vars[task], name='conv_1_t%d'%(task))
+        h = _bn(h, self.trainable_vars[task], self.train_phase[task], name='bn_1_t%d'%(task))
+        # Add lateral connections
+        for tt in range(task):
+            U_w = weight_variable([1, 1, self.h_pnn[tt][0].get_shape().as_list()[-1], h.get_shape().as_list()[-1]], name='conv_1_w_t%d_tt%d'%(task, tt))
+            U_b = bias_variable([h.get_shape().as_list()[-1]], name='conv_1_b_t%d_tt%d'%(task, tt))
+            self.trainable_vars[task].append(U_w)
+            self.trainable_vars[task].append(U_b)
+            h += create_conv_layer(self.h_pnn[tt][0], U_w, U_b, apply_relu=False)
+        h = tf.nn.relu(h)
+        self.h_pnn[task].append(h)
+
+        # Conv2_x
+        h = _residual_block(h, self.trainable_vars[task], self.train_phase[task], name='conv2_1_t%d'%(task))
+        h = _residual_block(h, self.trainable_vars[task], self.train_phase[task], apply_relu=False, name='conv2_2_t%d'%(task))
+        # Add lateral connections
+        for tt in range(task):
+            U_w = weight_variable([1, 1, self.h_pnn[tt][1].get_shape().as_list()[-1], h.get_shape().as_list()[-1]], name='conv_2_w_t%d_tt%d'%(task, tt))
+            U_b = bias_variable([h.get_shape().as_list()[-1]], name='conv_2_b_t%d_tt%d'%(task, tt))
+            self.trainable_vars[task].append(U_w)
+            self.trainable_vars[task].append(U_b)
+            h += create_conv_layer(self.h_pnn[tt][1], U_w, U_b, apply_relu=False)
+        h = tf.nn.relu(h)
+        self.h_pnn[task].append(h)
+
+        # Conv3_x
+        h = _residual_block_first(h, filters[2], strides[2], self.trainable_vars[task], self.train_phase[task], name='conv3_1_t%d'%(task), is_ATT_DATASET=self.is_ATT_DATASET)
+        h = _residual_block(h, self.trainable_vars[task], self.train_phase[task], apply_relu=False, name='conv3_2_t%d'%(task))
+        # Add lateral connections
+        for tt in range(task):
+            U_w = weight_variable([1, 1, self.h_pnn[tt][2].get_shape().as_list()[-1], h.get_shape().as_list()[-1]], name='conv_3_w_t%d_tt%d'%(task, tt))
+            U_b = bias_variable([h.get_shape().as_list()[-1]], name='conv_3_b_t%d_tt%d'%(task, tt))
+            self.trainable_vars[task].append(U_w)
+            self.trainable_vars[task].append(U_b)
+            h += create_conv_layer(self.h_pnn[tt][2], U_w, U_b, stride=strides[2], apply_relu=False)
+        h = tf.nn.relu(h)
+        self.h_pnn[task].append(h)
+
+        # Conv4_x
+        h = _residual_block_first(h, filters[3], strides[3], self.trainable_vars[task], self.train_phase[task], name='conv4_1_t%d'%(task), is_ATT_DATASET=self.is_ATT_DATASET)
+        h = _residual_block(h, self.trainable_vars[task], self.train_phase[task], apply_relu=False, name='conv4_2_t%d'%(task))
+        # Add lateral connections
+        for tt in range(task):
+            U_w = weight_variable([1, 1, self.h_pnn[tt][3].get_shape().as_list()[-1], h.get_shape().as_list()[-1]], name='conv_4_w_t%d_tt%d'%(task, tt))
+            U_b = bias_variable([h.get_shape().as_list()[-1]], name='conv_4_b_t%d_tt%d'%(task, tt))
+            self.trainable_vars[task].append(U_w)
+            self.trainable_vars[task].append(U_b)
+            h += create_conv_layer(self.h_pnn[tt][3], U_w, U_b, stride=strides[3], apply_relu=False)
+        h = tf.nn.relu(h)
+        self.h_pnn[task].append(h)
+
+        # Conv5_x
+        h = _residual_block_first(h, filters[4], strides[4], self.trainable_vars[task], self.train_phase[task], name='conv5_1_t%d'%(task), is_ATT_DATASET=self.is_ATT_DATASET)
+        h = _residual_block(h, self.trainable_vars[task], self.train_phase[task], apply_relu=False, name='conv5_2_t%d'%(task))
+        # Add lateral connections
+        for tt in range(task):
+            U_w = weight_variable([1, 1, self.h_pnn[tt][4].get_shape().as_list()[-1], h.get_shape().as_list()[-1]], name='conv_5_w_t%d_tt%d'%(task, tt))
+            U_b = bias_variable([h.get_shape().as_list()[-1]], name='conv_5_b_t%d_tt%d'%(task, tt))
+            self.trainable_vars[task].append(U_w)
+            self.trainable_vars[task].append(U_b)
+            h += create_conv_layer(self.h_pnn[tt][4], U_w, U_b, stride=strides[4], apply_relu=False)
+        h = tf.nn.relu(h)
+        self.h_pnn[task].append(h)
+
+        # Apply average pooling
+        h = tf.reduce_mean(h, [1, 2])
+
+        if self.network_arch == 'RESNET-S':
+            logits = _fc(h, self.total_classes, self.trainable_vars[task], name='fc_1_t%d'%(task), is_cifar=True)
+        else:
+            logits = _fc(h, self.total_classes, self.trainable_vars[task], name='fc_1_t%d'%(task))
+        for tt in range(task):
+            h_tt = tf.reduce_mean(self.h_pnn[tt][5], [1, 2])
+            U_w = weight_variable([h_tt.get_shape().as_list()[1], self.total_classes], name='fc_uw_1_t%d_tt%d'%(task, tt))
+            U_b = bias_variable([self.total_classes], name='fc_ub_1_t%d_tt%d'%(task, tt))
+            self.trainable_vars[task].append(U_w)
+            self.trainable_vars[task].append(U_b)
+            logits += create_fc_layer(h_tt, U_w, U_b, apply_relu=False)
+        self.h_pnn[task].append(logits)
+
+        return logits
+
+
     def fc_variables(self, layer_dims):
         """
         Defines variables for a 3-layer fc network
@@ -219,40 +634,18 @@ class Model:
             self.trainable_vars.append(w)
             self.trainable_vars.append(b)
 
-    def fc_feedforward(self, h, weights, store_features=True, store_synthetic_features=False, apply_dropout=False):
+    def fc_feedforward(self, h, weights, biases, apply_dropout=False):
         """
         Forward pass through a fc network
         Args:
             h               Input image (tensor)
-            weights         List of weights and biases
+            weights         List of weights for a fc network
+            biases          List of biases for a fc network
             apply_dropout   Whether to apply droupout (True/ False)
 
         Returns:
             Logits of a fc network
         """
-        num_layers = len(weights)// 2
-        if apply_dropout:
-            h = tf.nn.dropout(h, 1) # Apply dropout on Input?
-        #for (w, b) in list(zip(weights, biases))[:-1]:
-        for ii in range(num_layers-1): # Last layer weight and biases won't have a non-linearity
-            offset = ii*2
-            w = weights[offset]
-            b = weights[offset+1]
-            h = create_fc_layer(h, w, b)
-            if apply_dropout:
-                h = tf.nn.dropout(h, 1)  # Apply dropout on hidden layers?
-
-        # Store image features
-        if store_features:
-            self.features = h
-            self.image_feature_dim = h.get_shape().as_list()[-1]
-            if store_synthetic_features:
-                return h, create_fc_layer(h, weights[-2], weights[-1], apply_relu=False)
-        
-        return create_fc_layer(h, weights[-2], weights[-1], apply_relu=False)
-
-    """
-    def fc_feedforward(self, h, weights, biases, apply_dropout=False):
         if apply_dropout:
             h = tf.nn.dropout(h, 1) # Apply dropout on Input?
         for (w, b) in list(zip(weights, biases))[:-1]:
@@ -264,7 +657,184 @@ class Model:
         self.features = h
         self.image_feature_dim = h.get_shape().as_list()[-1]
         return create_fc_layer(h, weights[-1], biases[-1], apply_relu=False)
-    """
+
+    def conv_variables(self, kernel, depth):
+        """
+        Defines variables of a 5xconv-1xFC convolutional network
+        Args:
+
+        Returns:
+        """
+        self.weights = []
+        self.biases = []
+        self.trainable_vars = []
+        div_factor = 1
+
+        for i in range(len(kernel)):
+            w = weight_variable([kernel[i], kernel[i], depth[i], depth[i+1]], name='conv_%d'%(i))
+            b = bias_variable([depth[i+1]], name='conv_%d'%(i))
+            self.weights.append(w)
+            self.biases.append(b)
+            self.trainable_vars.append(w)
+            self.trainable_vars.append(b)
+
+            # Since we maxpool after every two conv layers
+            if ((i+1) % 2 == 0):
+                div_factor *= 2
+
+        flat_units = (self.image_size // div_factor) * (self.image_size // div_factor) * depth[-1]
+        w = weight_variable([flat_units, self.total_classes], name='fc_%d'%(i))
+        b = bias_variable([self.total_classes], name='fc_%d'%(i))
+        self.weights.append(w)
+        self.biases.append(b)
+        self.trainable_vars.append(w)
+        self.trainable_vars.append(b)
+
+    def conv_feedforward(self, h, weights, biases, apply_dropout=True):
+        """
+        Forward pass through a convolutional network
+        Args:
+            h               Input image (tensor)
+            weights         List of weights for a conv network
+            biases          List of biases for a conv network
+            apply_dropout   Whether to apply droupout (True/ False)
+
+        Returns:
+            Logits of a conv network
+        """
+        for i, (w, b) in enumerate(list(zip(weights, biases))[:-1]):
+
+            # Apply conv operation till the second last layer, which is a FC layer
+            h = create_conv_layer(h, w, b)
+
+            if ((i+1) % 2 == 0):
+
+                # Apply max pool after every two conv layers
+                h = tf.nn.max_pool(h, ksize=[1, 2, 2, 1], strides=[1, 2, 2, 1], padding='SAME')
+                
+                # Apply dropout   
+                if apply_dropout:
+                    h = tf.nn.dropout(h, self.keep_prob)
+
+        # Construct FC layers
+        shape = h.get_shape().as_list()
+        h = tf.reshape(h, [-1, shape[1] * shape[2] * shape[3]])
+        # Store image features 
+        self.features = h
+        self.image_feature_dim = h.get_shape().as_list()[-1]
+
+        return create_fc_layer(h, weights[-1], biases[-1], apply_relu=False)
+
+    def vgg_16_conv_feedforward(self, h):
+        """
+        Forward pass through a VGG 16 network
+
+        Return:
+            Logits of a VGG 16 network
+        """
+        self.trainable_vars = []
+        # Conv1
+        h = vgg_conv_layer(h, 3, 64, 1, self.trainable_vars, name='conv1_1')
+        h = vgg_conv_layer(h, 3, 64, 1, self.trainable_vars, name='conv1_2')
+        h = tf.nn.max_pool(h, ksize=[1, 2, 2, 1], strides=[1, 2, 2, 1], padding='SAME', name='pool1')
+        # Conv2
+        h = vgg_conv_layer(h, 3, 128, 1, self.trainable_vars, name='conv2_1')
+        h = vgg_conv_layer(h, 3, 128, 1, self.trainable_vars, name='conv2_2')
+        h = tf.nn.max_pool(h, ksize=[1, 2, 2, 1], strides=[1, 2, 2, 1], padding='SAME', name='pool2')
+        # Conv3
+        h = vgg_conv_layer(h, 3, 256, 1, self.trainable_vars, name='conv3_1')
+        h = vgg_conv_layer(h, 3, 256, 1, self.trainable_vars, name='conv3_2')
+        h = vgg_conv_layer(h, 3, 256, 1, self.trainable_vars, name='conv3_3')
+        h = tf.nn.max_pool(h, ksize=[1, 2, 2, 1], strides=[1, 2, 2, 1], padding='SAME', name='pool3')
+        # Conv4
+        h = vgg_conv_layer(h, 3, 512, 1, self.trainable_vars, name='conv4_1')
+        h = vgg_conv_layer(h, 3, 512, 1, self.trainable_vars, name='conv4_2')
+        h = vgg_conv_layer(h, 3, 512, 1, self.trainable_vars, name='conv4_3')
+        h = tf.nn.max_pool(h, ksize=[1, 2, 2, 1], strides=[1, 2, 2, 1], padding='SAME', name='pool4')
+        # Conv5
+        h = vgg_conv_layer(h, 3, 512, 1, self.trainable_vars, name='conv5_1')
+        h = vgg_conv_layer(h, 3, 512, 1, self.trainable_vars, name='conv5_2')
+        h = vgg_conv_layer(h, 3, 512, 1, self.trainable_vars, name='conv5_3')
+        h = tf.nn.max_pool(h, ksize=[1, 2, 2, 1], strides=[1, 2, 2, 1], padding='SAME', name='pool5')
+
+        # FC layers
+        shape = h.get_shape().as_list()
+        h = tf.reshape(h, [-1, shape[1] * shape[2] * shape[3]])
+        # fc6
+        h = vgg_fc_layer(h, 4096, self.trainable_vars, apply_relu=True, name='fc6')
+        # fc7
+        h = vgg_fc_layer(h, 4096, self.trainable_vars, apply_relu=True, name='fc7')
+        # Store image features 
+        self.features = h
+        self.image_feature_dim = h.get_shape().as_list()[-1]
+        # fc8
+        if self.class_attr is not None:
+            # Return the image features
+            return h
+        else:
+            logits = vgg_fc_layer(h, self.total_classes, self.trainable_vars, apply_relu=False, name='fc8')
+            return logits
+
+
+    def resnet18_conv_feedforward(self, h, kernels, filters, strides):
+        """
+        Forward pass through a ResNet-18 network
+
+        Returns:
+            Logits of a resnet-18 conv network
+        """
+        self.trainable_vars = []
+
+        # Conv1
+        h = _conv(h, kernels[0], filters[0], strides[0], self.trainable_vars, name='conv_1')
+        h = _bn(h, self.trainable_vars, self.train_phase, name='bn_1')
+        h = tf.nn.relu(h)
+
+        # Conv2_x
+        h = _residual_block(h, self.trainable_vars, self.train_phase, name='conv2_1')
+        h = _residual_block(h, self.trainable_vars, self.train_phase, name='conv2_2')
+
+        # Conv3_x
+        h = _residual_block_first(h, filters[2], strides[2], self.trainable_vars, self.train_phase, name='conv3_1', is_ATT_DATASET=self.is_ATT_DATASET)
+        h = _residual_block(h, self.trainable_vars, self.train_phase, name='conv3_2')
+
+        # Conv4_x
+        h = _residual_block_first(h, filters[3], strides[3], self.trainable_vars, self.train_phase, name='conv4_1', is_ATT_DATASET=self.is_ATT_DATASET)
+        h = _residual_block(h, self.trainable_vars, self.train_phase, name='conv4_2')
+
+        # Conv5_x
+        h = _residual_block_first(h, filters[4], strides[4], self.trainable_vars, self.train_phase, name='conv5_1', is_ATT_DATASET=self.is_ATT_DATASET)
+        h = _residual_block(h, self.trainable_vars, self.train_phase, name='conv5_2')
+
+        # Apply average pooling
+        h = tf.reduce_mean(h, [1, 2])
+
+        # Store the feature mappings
+        self.features = h
+        self.image_feature_dim = h.get_shape().as_list()[-1]
+
+        if self.class_attr is not None:
+            # Return the image features
+            return h
+        else:
+            if self.network_arch == 'RESNET-S':
+                logits = _fc(h, self.total_classes, self.trainable_vars, name='fc_1', is_cifar=True)
+            else:
+                logits = _fc(h, self.total_classes, self.trainable_vars, name='fc_1')
+            return logits
+
+
+    def get_attribute_embedding(self, attr):
+        """
+        Get attribute embedding using a simple FC network
+
+        Returns:
+            Embedding vector of k x ATTR_DIMS 
+        """
+        w = weight_variable([self.attr_dims, self.image_feature_dim], name='attr_embed_w')
+        self.trainable_vars.append(w)
+        # Return the inner product of attribute matrix and weight vector. 
+        return tf.matmul(attr, w) # Dimension should be TOTAL_CLASSES x image_feature_dim
 
     def loss_and_gradients(self, imp_method):
         """
@@ -275,7 +845,7 @@ class Model:
         Returns:
         """
         reg = 0.0
-        if imp_method == 'VAN'  or 'ER-' in imp_method or 'GEM' in imp_method or imp_method == 'MER':
+        if imp_method == 'VAN'  or imp_method == 'PNN' or imp_method == 'ER' or 'GEM' in imp_method:
             pass
         elif imp_method == 'EWC' or imp_method == 'M-EWC':
             reg = tf.add_n([tf.reduce_sum(tf.square(w - w_star) * f) for w, w_star, 
@@ -291,19 +861,31 @@ class Model:
                 f, scr in zip(self.trainable_vars, self.star_vars, self.normalized_fisher_at_minima_vars, 
                     self.normalized_score_vars)])
      
-        # Regularized training loss
-        self.reg_loss = tf.squeeze(self.unweighted_entropy + self.synap_stgth * reg)
-        # Compute the gradients of the vanilla loss
-        self.vanilla_gradients_vars = self.opt.compute_gradients(self.unweighted_entropy, 
-                var_list=self.trainable_vars)
-        # Compute the gradients of regularized loss
-        self.reg_gradients_vars = self.opt.compute_gradients(self.reg_loss, 
+        """
+        # ***** DON't USE THIS WITH MULTI-HEAD SETTING SINCE THIS WILL UPDATE ALL THE WEIGHTS *****
+        # If CNN arch, then use the weight decay
+        if self.is_ATT_DATASET:
+            self.unweighted_entropy += tf.add_n([0.0005 * tf.nn.l2_loss(v) for v in self.trainable_vars if 'weights' in v.name or 'kernel' in v.name])
+        """
+        
+        if imp_method == 'PNN':
+            # Compute the gradients of regularized loss
+            self.reg_gradients_vars  = []
+            for i in range(self.num_tasks):
+                self.reg_gradients_vars.append([])
+                self.reg_gradients_vars[i] = self.opt.compute_gradients(self.unweighted_entropy[i], var_list=self.trainable_vars[i])
+        elif imp_method != 'A-GEM': # For A-GEM we will define the losses and gradients later on
+            if imp_method == 'ER' and 'FC-' not in self.network_arch:
+                self.reg_loss = tf.add_n([self.unweighted_entropy[i] for i in range(self.num_tasks)])/ self.mem_batch_size
+            else:
+                # Regularized training loss
+                self.reg_loss = tf.squeeze(self.unweighted_entropy + self.synap_stgth * reg)
+                # Compute the gradients of the vanilla loss
+                self.vanilla_gradients_vars = self.opt.compute_gradients(self.unweighted_entropy, 
+                        var_list=self.trainable_vars)
+            # Compute the gradients of regularized loss
+            self.reg_gradients_vars = self.opt.compute_gradients(self.reg_loss, 
                     var_list=self.trainable_vars)
-        
-        if imp_method == 'ER-Hindsight-Anchors':
-            self.create_hindsight_anchor_ops_FC()
-            self.create_er_anchor_ops_FC()
-        
 
     def train_op(self):
         """
@@ -312,9 +894,12 @@ class Model:
 
         Returns:
         """
-        if self.imp_method == 'VAN' or 'ER-' in self.imp_method or self.imp_method == 'MER':
+        if self.imp_method == 'VAN' or self.imp_method == 'ER':
             # Define training operation
             self.train = self.opt.apply_gradients(self.reg_gradients_vars)
+        elif self.imp_method == 'PNN': 
+            # Define training operation
+            self.train = [self.opt.apply_gradients(self.reg_gradients_vars[i]) for i in range(self.num_tasks)]
         elif self.imp_method == 'FTR_EXT':
             # Define a training operation for the first and subsequent tasks
             self.train = self.opt.apply_gradients(self.reg_gradients_vars)
@@ -369,15 +954,6 @@ class Model:
             elif self.imp_method == 'A-GEM' or self.imp_method == 'S-GEM':
                 self.ref_grads.append(tf.Variable(tf.zeros(self.trainable_vars[v].get_shape()), trainable=False))
                 self.projected_gradients_list.append(tf.Variable(tf.zeros(self.trainable_vars[v].get_shape()), trainable=False))
-            elif 'MER' in self.imp_method:
-                # Variables to store parameters \theta_0^A in the paper
-                self.theta_not_a.append(tf.Variable(tf.zeros(self.trainable_vars[v].get_shape()), trainable=False,
-                                                  name=self.trainable_vars[v].name.rsplit(':')[0]+'_theta_not_a'))
-                # Variables to store parameters \theta_{i,0}^W in the paper
-                self.theta_i_not_w.append(tf.Variable(tf.zeros(self.trainable_vars[v].get_shape()), trainable=False,
-                                                  name=self.trainable_vars[v].name.rsplit(':')[0]+'_theta_i_not_w'))
-                self.theta_i_a.append(tf.Variable(tf.zeros(self.trainable_vars[v].get_shape()), trainable=False,
-                                                  name=self.trainable_vars[v].name.rsplit(':')[0]+'_theta_i_not_w'))
 
     def get_current_weights(self):
         """
@@ -572,7 +1148,10 @@ class Model:
         """
         Define operations for Stochastic GEM
         """
-        self.agem_loss = self.unweighted_entropy
+        if 'FC-' in self.network_arch or self.imp_method == 'S-GEM':
+            self.agem_loss = self.unweighted_entropy
+        else:
+            self.agem_loss = tf.add_n([self.unweighted_entropy[i] for i in range(self.num_tasks)])/ self.mem_batch_size
 
         ref_grads = tf.gradients(self.agem_loss, self.trainable_vars)
         # Reference gradient for previous tasks
@@ -609,92 +1188,8 @@ class Model:
         # Define training operations for the first task
         self.first_task_gradients_vars = self.opt.compute_gradients(self.agem_loss, var_list=self.trainable_vars)
         self.train_first_task = self.opt.apply_gradients(self.first_task_gradients_vars)
-       
-    def create_mer_ops(self):
-        """
-        Define operations for Meta-Experience replay
-        """
-        # Operation to store \theta_0^A
-        self.store_theta_not_a = [tf.assign(var, val) for var, val in zip(self.theta_not_a, self.trainable_vars)]
-        # Operation to store \theta_{i,0}^W
-        self.store_theta_i_not_w = [tf.assign(var, val) for var, val in zip(self.theta_i_not_w, self.trainable_vars)]
-        # Operation to store \theta_i^W
-        self.store_theta_i_a = [tf.assign(var, val) for var, val in zip(self.theta_i_a, self.trainable_vars)]
-        # With in batch reptile update
-        self.with_in_batch_reptile_update = [tf.assign(var, val + self.mer_beta * (var - val)) for var, val in zip(self.trainable_vars, self.theta_i_not_w)]
-        # Across the batch reptile update
-        self.across_batch_reptile_update = [tf.assign(var, val1 + self.mer_gamma * (val2 - val1)) for var, val1, val2 in zip(self.trainable_vars, self.theta_not_a, self.theta_i_a)]
 
-    def create_hindsight_anchor_ops_FC(self):
-        """
-        Hindsight Anchor operations for FC Network
-        """
-        def compute_forgetting_loss(x, star_vars, train_vars):
-            synthetic_features, logits_at_theta_star = self.fc_feedforward(x, star_vars, store_synthetic_features=True)
-            loss_at_theta_star = tf.reduce_mean(tf.nn.softmax_cross_entropy_with_logits_v2(labels=self.y_,
-                                    logits=logits_at_theta_star))
-            logits_at_theta = self.fc_feedforward(x, train_vars, store_features=False)
-            loss_at_theta = tf.reduce_mean(tf.nn.softmax_cross_entropy_with_logits_v2(labels=self.y_,
-                                    logits=logits_at_theta))
-            negForgetting_loss = loss_at_theta_star - loss_at_theta
-            return negForgetting_loss, synthetic_features
 
-        self.negForgetting_loss, synthetic_features = compute_forgetting_loss(self.anchor_xx, self.star_vars, self.trainable_vars)
-        self.phi_distance = tf.losses.cosine_distance(tf.math.l2_normalize(self.phi_hat_reference),
-                                                      tf.math.l2_normalize(tf.squeeze(synthetic_features)), axis=0, reduction='weighted_mean')
-        self.hindsight_objective = self.negForgetting_loss + self.anchor_eta*self.phi_distance
-
-        hindsight_anchor_grad_vars = self.anchor_opt.compute_gradients(self.hindsight_objective, var_list=self.anchor_xx)
-        self.update_hindsight_anchor = self.anchor_opt.apply_gradients(hindsight_anchor_grad_vars)
-        self.reset_anchor_xx = tf.initialize_variables([self.anchor_xx])
-    
-    def create_er_anchor_ops_FC(self):
-        """
-        Anchoring objective operations for FC
-        """
-        # Temporary gradient update on the batch from the current task and replay buffer
-        tmp_param_grads = tf.gradients(self.unweighted_entropy, self.trainable_vars)
-        if STOP_GRADIENTS:  # First order approximation
-            tmp_param_grads = [tf.stop_gradient(grad) for grad in tmp_param_grads]
-        tmp_params = [w - self.learning_rate*g for w, g in zip(self.trainable_vars, tmp_param_grads)]
-
-        # Check how much the updated parameters change the function values at the anchoring points
-        anchor_logits = self.fc_feedforward(self.anchor_points, self.trainable_vars, store_features=False)
-        tmp_logits = self.fc_feedforward(self.anchor_points, tmp_params, store_features=False)
-        task_logits = self.fc_feedforward(self.x, self.trainable_vars)
-        self.anchor_loss = tf.reduce_mean(tf.reduce_sum((anchor_logits-tmp_logits)**2, axis=1))
-        self.task_loss = tf.reduce_mean(tf.nn.softmax_cross_entropy_with_logits_v2(labels=self.y_,
-                                        logits=task_logits))
-        self.final_anchor_loss = tf.squeeze(self.task_loss + self.synap_stgth*self.anchor_loss)
-        self.anchor_gradients_vars = self.opt.compute_gradients(self.final_anchor_loss,
-                    var_list=self.trainable_vars)
-        self.train_anchor = self.opt.apply_gradients(self.anchor_gradients_vars)
-
-    def running_average_of_features(self):
-        """
-        Define operations for the running average of features
-        """
-        ####### \hat{phi}_i = \alpha * \hat{phi}_i + (1 - \alpha) * phi_i ------> Eq.1 ##############
-        # Placeholder for controlling the running average weight
-        self.phi_hat_alpha = tf.placeholder(dtype=tf.float32, shape=())
-        # Placeholder for phi_hat to be used as groundtruth later on for the hindsight ER
-        self.phi_hat_reference = tf.placeholder(tf.float32, shape=[self.image_feature_dim])
-        # Variable for storing class specific features average
-        self.phi_hat = tf.get_variable('mean_activations_per_class', [self.total_classes, self.image_feature_dim], tf.float32, initializer=tf.constant_initializer(0.0), trainable=False)
-        # Mask for the average features
-        phi_hat_mask = tf.Variable(tf.ones(self.phi_hat.get_shape(), dtype=tf.float32), trainable=False)
-        # Get the class indices present in the batch
-        class_indices = tf.where(tf.not_equal(self.y_, tf.constant(0, dtype=tf.float32)))[:, 1]
-        # Update the mask (* alpha) for the classes present in the batch. If there are multiple examples from the same class in the batch
-        # only one of the example will set the mask (property of scatter_update)
-        phi_hat_mask = tf.scatter_update(phi_hat_mask, class_indices, self.phi_hat_alpha*tf.ones_like(self.features))
-        # Multiply the existing value of running sum with \alpha => (\alpha * \hat{phi}_i of Eq. 1 above)
-        self.phi_hat = tf.scatter_update(self.phi_hat, class_indices, tf.multiply(tf.gather(phi_hat_mask, class_indices), tf.gather(self.phi_hat, class_indices)))
-        # Add the (1 - \alpha) * phi in the running sum
-        self.phi_hat = tf.scatter_add(self.phi_hat, class_indices, (1-self.phi_hat_alpha)*self.features)
-        # Reset op for the h_hat
-        #self.reset_phi_hat = tf.initialize_variables([self.phi_hat])
-        self.reset_phi_hat = tf.assign(self.phi_hat, tf.zeros_like(self.phi_hat))
 #################################################################################
 #### External APIs of the class. These will be called/ exposed externally #######
 #################################################################################
@@ -737,9 +1232,10 @@ class Model:
         """
         # Set the star values to the initial weights, so that we can calculate
         # big_omegas reliably
-        sess.run(self.set_star_vars)
+        if self.imp_method != 'PNN':
+            sess.run(self.set_star_vars)
 
-    def task_updates(self, sess, task, train_x, train_labels, num_classes_per_task=10, online_cross_val=False):
+    def task_updates(self, sess, task, train_x, train_labels, num_classes_per_task=10, class_attr=None, online_cross_val=False):
         """
         Updates different variables when a task is completed
         Args:
@@ -747,6 +1243,7 @@ class Model:
             task                Task ID
             train_x             Training images for the task 
             train_labels        Labels in the task
+            class_attr          Class attributes (only needed for ZST transfer)
         Returns:
         """
         if self.imp_method == 'VAN' or self.imp_method == 'PNN':
@@ -814,6 +1311,10 @@ class Model:
         elif self.imp_method == 'MAS':
             # zero out any previous values
             sess.run(self.reset_hebbian_scores)
+            if self.class_attr is not None:
+                # Define mask based on the class attributes
+                masked_class_attrs = np.zeros_like(class_attr)
+                masked_class_attrs[train_labels] = class_attr[train_labels]
             # Logits mask
             logit_mask = np.zeros(self.total_classes)
             logit_mask[train_labels] = 1.0
@@ -823,8 +1324,12 @@ class Model:
             num_samples = train_x.shape[0]
             for iters in range(num_samples// batch_size):
                 offset = iters * batch_size
-                sess.run(self.accumulate_hebbian_scores, feed_dict={self.x: train_x[offset:offset+batch_size], self.keep_prob: 1.0, 
-                    self.output_mask: logit_mask})
+                if self.class_attr is not None:
+                    sess.run(self.accumulate_hebbian_scores, feed_dict={self.x: train_x[offset:offset+batch_size], self.keep_prob: 1.0, 
+                            self.class_attr: masked_class_attrs, self.output_mask: logit_mask, self.train_phase: False})
+                else:
+                    sess.run(self.accumulate_hebbian_scores, feed_dict={self.x: train_x[offset:offset+batch_size], self.keep_prob: 1.0, 
+                        self.output_mask: logit_mask, self.train_phase: False})
 
             # Average the hebbian scores across the training examples
             sess.run(self.average_hebbian_scores, feed_dict={self.train_samples: num_samples})
