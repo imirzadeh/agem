@@ -15,7 +15,7 @@ import tensorflow as tf
 from copy import deepcopy
 from six.moves import cPickle as pickle
 
-from utils.data_utils import construct_permute_mnist
+from utils.data_utils import construct_permute_mnist, construct_rotate_mnist
 from utils.er_utils import update_reservior, update_fifo_buffer, er_mem_update_hindsight, update_avg_image_vectors
 from utils.utils import get_sample_weights, sample_from_dataset, update_episodic_memory, concatenate_datasets, samples_for_each_class, sample_from_dataset_icarl, average_acc_stats_across_runs, average_fgt_stats_across_runs
 from utils.vis_utils import plot_acc_multiple_runs, plot_histogram, snapshot_experiment_meta_data, snapshot_experiment_eval
@@ -157,7 +157,7 @@ def train_task_sequence(model, sess, args):
 
         time_start = time.time()
         # Load the permute mnist dataset
-        datasets = construct_permute_mnist(model.num_tasks)
+        datasets = construct_rotate_mnist(model.num_tasks)#construct_permute_mnist(model.num_tasks)
         time_end = time.time()
         time_spent = time_end - time_start
         print('Data loading time: {}'.format(time_spent))
