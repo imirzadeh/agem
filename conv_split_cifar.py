@@ -34,9 +34,9 @@ from model import Model
 ## Training Options
 NUM_RUNS = 5           # Number of experiments to average over
 TRAIN_ITERS = 2000      # Number of training iterations per task
-BATCH_SIZE = 16
+BATCH_SIZE = 64
 LEARNING_RATE = 0.1    
-RANDOM_SEED = 1234
+RANDOM_SEED = 3235
 VALID_OPTIMS = ['SGD', 'MOMENTUM', 'ADAM']
 OPTIM = 'SGD'
 OPT_MOMENTUM = 0.9
@@ -50,7 +50,7 @@ IMP_METHOD = 'EWC'
 SYNAP_STGTH = 75000
 FISHER_EMA_DECAY = 0.9          # Exponential moving average decay factor for Fisher computation (online Fisher)
 FISHER_UPDATE_AFTER = 50        # Number of training iterations for which the F_{\theta}^t is computed (see Eq. 10 in RWalk paper) 
-SAMPLES_PER_CLASS = 13
+SAMPLES_PER_CLASS = 1
 IMG_HEIGHT = 32
 IMG_WIDTH = 32
 IMG_CHANNELS = 3
