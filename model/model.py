@@ -636,7 +636,7 @@ class Model:
             self.trainable_vars.append(w)
             self.trainable_vars.append(b)
 
-    def fc_feedforward(self, h, weights, biases, apply_dropout=False):
+    def fc_feedforward(self, h, weights, biases, apply_dropout=True):
         """
         Forward pass through a fc network
         Args:
@@ -653,7 +653,7 @@ class Model:
         for (w, b) in list(zip(weights, biases))[:-1]:
             h = create_fc_layer(h, w, b)
             if apply_dropout:
-                h = tf.nn.dropout(h, 1)  # Apply dropout on hidden layers?
+                h = tf.nn.dropout(h, keep_prob=0.75)  # Apply dropout on hidden layers?
 
         # Store image features 
         self.features = h
