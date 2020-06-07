@@ -114,9 +114,11 @@ def get_arguments():
                        help="Number of training iterations after which the Fisher will be updated.")
     parser.add_argument("--mem-size", type=int, default=SAMPLES_PER_CLASS,
                        help="Number of samples per class from previous tasks.")
+    parser.add_argument("--decay", type=float, default=0.4,
+                       help="learning rate decay factor (gamma)")
     parser.add_argument("--eps-mem-batch", type=int, default=EPS_MEM_BATCH_SIZE,
                        help="Number of samples per class from previous tasks.")
-    parser.add_argument("--examples-per-task", type=int, default=1000,
+    parser.add_argument("--examples-per-task", type=int, default=50000,
                        help="Number of examples per task.")
     parser.add_argument("--log-dir", type=str, default=LOG_DIR,
                        help="Directory where the plots and model accuracies will be stored.")
@@ -211,8 +213,8 @@ def train_task_sequence(model, sess, args):
             # Randomly suffle the training examples
             perm = np.arange(total_train_examples)
             np.random.shuffle(perm)
-            train_x = task_train_images[perm]#[:args.examples_per_task]
-            train_y = task_train_labels[perm]#[:args.examples_per_task]
+            train_x = task_train_images[perm][:args.examples_per_task]
+            train_y = task_train_labels[perm][:args.examples_per_task]
             task_sample_weights = task_sample_weights[perm][:args.examples_per_task]
             
             print('Received {} images, {} labels at task {}'.format(train_x.shape[0], train_y.shape[0], task))

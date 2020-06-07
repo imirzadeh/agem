@@ -107,7 +107,7 @@ class Model:
         
         # Save the arguments passed from the main script
         self.global_step = tf.Variable(0, trainable=False)
-        self.learning_rate = tf.train.exponential_decay(all_args.learning_rate, self.global_step, 2500, 0.5, staircase=True)
+        self.learning_rate = tf.train.exponential_decay(all_args.learning_rate, self.global_step, 3100, all_args.decay, staircase=True)
         self.opt = tf.train.GradientDescentOptimizer(learning_rate=self.learning_rate)#opt
         self.num_tasks = num_tasks
         self.imp_method = imp_method
