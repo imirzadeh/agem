@@ -216,12 +216,7 @@ def train_task_sequence(model, sess, args):
             task_sample_weights = task_sample_weights[perm][:args.examples_per_task]
             
             print('Received {} images, {} labels at task {}'.format(train_x.shape[0], train_y.shape[0], task))
-            print("get global step")
-            tf.print(model.global_step, output_stream=sys.stderr)
-            tf.print(model.learning_rate, output_stream=sys.stderr)
-            with tf.Session() as sess:
-                print(sess.run(model.learning_rate))
-            print('----'*5)
+
             # Array to store accuracies when training for task T
             ftask = []
             
@@ -361,6 +356,12 @@ def train_task_sequence(model, sess, args):
                         examples_seen_so_far += 1
 
                 if (iters % 1000 == 0):
+                    print("get global step")
+                    tf.print(model.global_step, output_stream=sys.stderr)
+                    tf.print(model.learning_rate, output_stream=sys.stderr)
+                    with tf.Session() as sess:
+                        print(sess.run(model.learning_rate))
+                    print('----'*5)
                     print('Step {:d} {:.3f}'.format(iters, loss))
 
                 if (math.isnan(loss)):
