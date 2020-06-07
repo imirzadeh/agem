@@ -9,6 +9,7 @@ EPS_MEM_BATCH_SIZE=16
 MEM_SIZE=1
 LOG_DIR='results/'
 lr=0.1
+ARCH='FC-S'
 
 python3 ./fc_permute_mnist.py --examples-per-task 50000 --arch $ARCH --num-runs $NUM_RUNS --batch-size $BATCH_SIZE --optim $OPTIM --learning-rate $lr --imp-method 'A-GEM' --synap-stgth $lam --log-dir $RESULTS_DIR
 
