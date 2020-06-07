@@ -70,7 +70,7 @@ LOG_DIR = './permute_mnist_results'
 ## Evaluation options
 
 ## Num Tasks
-NUM_TASKS = 20
+NUM_TASKS = 5
 MULTI_TASK = False
 
 def get_arguments():
@@ -211,8 +211,8 @@ def train_task_sequence(model, sess, args):
             # Randomly suffle the training examples
             perm = np.arange(total_train_examples)
             np.random.shuffle(perm)
-            train_x = task_train_images[perm][:args.examples_per_task]
-            train_y = task_train_labels[perm][:args.examples_per_task]
+            train_x = task_train_images[perm]#[:args.examples_per_task]
+            train_y = task_train_labels[perm]#[:args.examples_per_task]
             task_sample_weights = task_sample_weights[perm][:args.examples_per_task]
             
             print('Received {} images, {} labels at task {}'.format(train_x.shape[0], train_y.shape[0], task))
@@ -463,6 +463,7 @@ def main():
 
     # Get the CL arguments
     args = get_arguments()
+    # 
 
     # Check if the network architecture is valid
     if args.arch not in VALID_ARCHS:

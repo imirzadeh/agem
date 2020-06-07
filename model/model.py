@@ -61,7 +61,7 @@ class Model:
     """
 
     def __init__(self, x_train, y_, num_tasks, opt, imp_method, synap_stgth, fisher_update_after, fisher_ema_decay, network_arch='FC-S', 
-            is_ATT_DATASET=False, x_test=None, attr=None):
+            is_ATT_DATASET=False, x_test=None, attr=None, all_args=None):
         """
         Instantiate the model
         """
@@ -106,7 +106,9 @@ class Model:
             self.attr_dims = int(self.class_attr.get_shape()[1])
         
         # Save the arguments passed from the main script
-        self.opt = opt
+        self.global_step = tf.Variable(0, trainable=False)
+        self.learning_rate = tf.train.exponential_decay(all_args.learning_rate, self.global_step, 5000, 0.5, staircase=True)
+        self.opt = tf.train.GradientDescentOptimizer(learning_rate=self.learning_rate)#opt
         self.num_tasks = num_tasks
         self.imp_method = imp_method
         self.fisher_update_after = fisher_update_after
@@ -896,7 +898,7 @@ class Model:
         """
         if self.imp_method == 'VAN' or self.imp_method == 'ER':
             # Define training operation
-            self.train = self.opt.apply_gradients(self.reg_gradients_vars)
+            self.train = self.opt.apply_gradients(self.reg_gradients_vars, global_step=self.global_step)
         elif self.imp_method == 'PNN': 
             # Define training operation
             self.train = [self.opt.apply_gradients(self.reg_gradients_vars[i]) for i in range(self.num_tasks)]
@@ -908,7 +910,7 @@ class Model:
             # Get the value of old weights first
             with tf.control_dependencies([self.weights_old_ops_grouped]):
                 # Define a training operation
-                self.train = self.opt.apply_gradients(self.reg_gradients_vars)
+                self.train = self.opt.apply_gradients(self.reg_gradients_vars, global_step=self.global_step)
 
     def init_vars(self):
         """
