@@ -217,7 +217,7 @@ def train_task_sequence(model, sess, args):
             
             print('Received {} images, {} labels at task {}'.format(train_x.shape[0], train_y.shape[0], task))
             print("get global step")
-            tf.print(model.global_step)
+            tf.print(model.global_step, output_stream=sys.stderr)
             # Array to store accuracies when training for task T
             ftask = []
             
