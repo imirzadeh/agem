@@ -1185,11 +1185,11 @@ class Model:
             self.store_proj_grads = tf.group(*store_proj_grad_ops)
             # Define training operations for the tasks > 1
             with tf.control_dependencies([self.store_proj_grads]):
-                self.train_subseq_tasks = self.opt.apply_gradients(zip(self.projected_gradients_list, self.trainable_vars))
+                self.train_subseq_tasks = self.opt.apply_gradients(zip(self.projected_gradients_list, self.trainable_vars), global_step=self.global_step)
 
         # Define training operations for the first task
         self.first_task_gradients_vars = self.opt.compute_gradients(self.agem_loss, var_list=self.trainable_vars)
-        self.train_first_task = self.opt.apply_gradients(self.first_task_gradients_vars)
+        self.train_first_task = self.opt.apply_gradients(self.first_task_gradients_vars, global_step=self.global_step)
 
 
 #################################################################################
