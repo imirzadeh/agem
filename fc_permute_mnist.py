@@ -216,7 +216,8 @@ def train_task_sequence(model, sess, args):
             task_sample_weights = task_sample_weights[perm][:args.examples_per_task]
             
             print('Received {} images, {} labels at task {}'.format(train_x.shape[0], train_y.shape[0], task))
-
+            print("get global step")
+            tf.print(model.global_step)
             # Array to store accuracies when training for task T
             ftask = []
             
