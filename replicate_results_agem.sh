@@ -26,6 +26,6 @@ lambda=10
 # python3 ./fc_permute_mnist.py --random-seed 3114 --decay 0.75 --examples-per-task 50000 --arch $ARCH --num-runs $NUM_RUNS --batch-size $BATCH_SIZE --optim $OPTIM --learning-rate $lr --imp-method 'ER' --log-dir $LOG_DIR
 # python3 ./fc_permute_mnist.py --random-seed 3114 --decay 0.75 --examples-per-task 50000 --arch $ARCH --num-runs $NUM_RUNS --batch-size $BATCH_SIZE --optim $OPTIM --learning-rate $lr --imp-method 'ER' --log-dir $LOG_DIR
 
-python3 ./fc_permute_mnist.py --random-seed 1234 --decay 0.75 --examples-per-task 50000 --arch $ARCH --num-runs $NUM_RUNS --batch-size $BATCH_SIZE --optim $OPTIM --learning-rate $lr --imp-method 'EWC' -synap-stgth $lambda --log-dir $LOG_DIR
-python3 ./fc_permute_mnist.py --random-seed 4567 --decay 0.75 --examples-per-task 50000 --arch $ARCH --num-runs $NUM_RUNS --batch-size $BATCH_SIZE --optim $OPTIM --learning-rate $lr --imp-method 'EWC' -synap-stgth $lambda --log-dir $LOG_DIR
-python3 ./fc_permute_mnist.py --random-seed 3114 --decay 0.75 --examples-per-task 50000 --arch $ARCH --num-runs $NUM_RUNS --batch-size $BATCH_SIZE --optim $OPTIM --learning-rate $lr --imp-method 'EWC' -synap-stgth $lambda --log-dir $LOG_DIR
+python3 ./fc_permute_mnist.py --random-seed 1234 --decay 0.75 --examples-per-task 50000 --arch $ARCH --num-runs $NUM_RUNS --batch-size $BATCH_SIZE --optim $OPTIM --learning-rate $lr --imp-method 'EWC' -s-ynap-stgth $lambda --log-dir $LOG_DIR
+python3 ./fc_permute_mnist.py --random-seed 4567 --decay 0.75 --examples-per-task 50000 --arch $ARCH --num-runs $NUM_RUNS --batch-size $BATCH_SIZE --optim $OPTIM --learning-rate $lr --imp-method 'EWC' --synap-stgth $lambda --log-dir $LOG_DIR
+python3 ./fc_permute_mnist.py --random-seed 3114 --decay 0.75 --examples-per-task 50000 --arch $ARCH --num-runs $NUM_RUNS --batch-size $BATCH_SIZE --optim $OPTIM --learning-rate $lr --imp-method 'EWC' --synap-stgth $lambda --log-dir $LOG_DIR
