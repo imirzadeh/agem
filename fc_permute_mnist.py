@@ -359,9 +359,8 @@ def train_task_sequence(model, sess, args):
                     print("get global step")
                     tf.print(model.global_step, output_stream=sys.stderr)
                     tf.print(model.learning_rate, output_stream=sys.stderr)
-                    with tf.Session() as sess:
-                        print(sess.run(model.learning_rate))
-                    print('----'*5)
+                    lr = sess.run([model.learning_rate], feed_dict=feed_dict)
+                    print(lr)
                     print('Step {:d} {:.3f}'.format(iters, loss))
 
                 if (math.isnan(loss)):
