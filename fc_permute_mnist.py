@@ -542,7 +542,7 @@ def main():
 
         # Create the Model/ contruct the graph
         model = Model(x, y_, num_tasks, opt, args.imp_method, args.synap_stgth, args.fisher_update_after, 
-                args.fisher_ema_decay, network_arch=args.arch)
+                args.fisher_ema_decay, network_arch=args.arch, all_args=args)
 
         # Set up tf session and initialize variables.
         if USE_GPU:
